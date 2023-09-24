@@ -166,6 +166,17 @@ static void action_Handler(uint8_t btnId, uint8_t btnState) {
       case State2Temp:
         showHumidity = !showHumidity;
         break;
+      case State3Water:
+        // Toggle Window
+        if (windowOpen) {
+          windowMotor.write(0);
+          windowOpen = false;
+        } else {
+          windowMotor.write(180);
+          windowOpen = true;
+        }
+        // NOTE: BECAUSE OF THE MOISTURE DETECTION LOGIC IN THIS STATE, THIS TOGGLE COULD BE IMMEDIATELY REVERTED, so we delay.
+        delay(750);
       case State4Fan:
         fanMode++;
         if (fanMode > 3) {
@@ -236,14 +247,27 @@ void state2Temp(){
 }
 
 void state3Water() {
-  if(machine.executeOnce){
-    lcd.print("Water/Steam");
-  }
-  lcd.setCursor(0, 1);
-
   int water_val = analogRead(WATER_SENSOR_PIN);
+
+  if(machine.executeOnce){
+    lcd.print("Water/Window");
+
+    // Open the window automatically if no water found.
+    if(water_val < 1500 && !windowOpen) {
+      windowMotor.write(180);
+      windowOpen = true;
+    }
+  }
+  
+  lcd.setCursor(0, 1);
   if(water_val > 1500) {
     lcd.print("WATER!  ");
+
+    // CLose the window if open and water is detected.
+    if (windowOpen) {
+      windowMotor.write(0);
+      windowOpen = false;
+    }
   }
   else {
     lcd.print("NO WATER");
