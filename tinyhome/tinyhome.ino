@@ -1,6 +1,5 @@
 #include <ESP32Tone.h>
 #include <pitches.h>
-
 #include <xht11.h>
 #include <StateMachine.h>
 #include <LiquidCrystal_I2C.h>
@@ -9,6 +8,7 @@
 #include <Wire.h>
 #include <MFRC522_I2C.h>
 #include <Adafruit_NeoPixel.h>
+#include <WiFi.h>
 
 // Yellow Buttons (Menu/Interact)
 #define YELLOW_BUTTON_1_PIN 16
@@ -38,6 +38,7 @@
 #define State7NeoPixel  7
 #define State8Sound     8
 #define State9Gas       9
+#define State10Online   10
 
 // LCD
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -56,6 +57,7 @@ State* S6 = machine.addState(&state6Rfid);
 State* S7 = machine.addState(&state7NeoPixel);
 State* S8 = machine.addState(&state8Sound);
 State* S9 = machine.addState(&state9Gas);
+State* S10 = machine.addState(&state10Online);
 
 // Button Handlers
 // (The ids are so one handler function can tell different buttons apart if necessary.)
@@ -82,7 +84,7 @@ Servo doorMotor;
 // RFID Reader NOTE the -1 on the RST_PIN.
 // 0x28 is the i2c address of SDA, if doesn't match，please check your address with i2c. IIC pins default to GPIO21 and GPIO22 of ESP32
 MFRC522_I2C mfrc522(0x28, -1);
-String password = "";
+String rfIdPassword = "";
 
 // NeoPxel
 Adafruit_NeoPixel neoStrip(4, NEO_PIXEL_PIN, NEO_GRB + NEO_KHZ800);
@@ -92,6 +94,12 @@ int lightMode = 0;
 int musicScale[8] = { NOTE_C4, NOTE_D4, NOTE_E4, NOTE_F4, NOTE_G4, NOTE_A5, NOTE_B5, NOTE_C5 };
 String musicScaleNotes[8] = { "C4", "D4", "E4", "F4", "G4", "A5", "B5", "C5" };
 int musicNoteIndex = 0;
+
+// WIFI
+const char* ssid = "***********";
+const char* password = "*********";
+unsigned long wifiTimeoutStart = 0;
+bool wifiDisconnected;
 
 void setup() {
   Serial.begin(115200);
@@ -189,6 +197,9 @@ static void stateChange_Handler(uint8_t btnId, uint8_t btnState) {
         machine.transitionTo(S9);
         break;
       case State9Gas:
+        machine.transitionTo(S10);
+        break;
+      case State10Online:
         machine.transitionTo(S0);
         break;
       default:
@@ -373,6 +384,9 @@ void state5Proximity() {
   bool proximityFound = digitalRead(PROXIMITY_PIN);
   if (proximityFound) {
     lcd.print("Activity!     ");
+    tone(SPEAKER_PIN, NOTE_C2, 100, 0);
+    tone(SPEAKER_PIN, NOTE_C2, 100, 0);
+    tone(SPEAKER_PIN, NOTE_C2, 100, 0);
   } else {
     lcd.print("No Activity.  ");
   }
@@ -391,14 +405,14 @@ void state6Rfid() {
     } else {
       lcd.print("Closed.     ");
     }
-    password = "";
+    rfIdPassword = "";
     return;
   }
 
   for (byte i = 0; i < mfrc522.uid.size; i++) {
-    password = password + String(mfrc522.uid.uidByte[i]);
+    rfIdPassword = rfIdPassword + String(mfrc522.uid.uidByte[i]);
   }
-  if (password == "693854118")  //The card number is correct, open the door
+  if (rfIdPassword == "693854118")  //The card number is correct, open the door
   {
     if (doorOpen) {
       // Door already open.
@@ -418,7 +432,7 @@ void state6Rfid() {
 
 void state7NeoPixel() {
   if (machine.executeOnce) {
-    lcd.print("Neo Pixel Lights");
+    lcd.print("Party Lights!");
   }
   lcd.setCursor(0, 1);
 
@@ -484,15 +498,67 @@ void state9Gas() {
   // Hazerdous gas detected!
   if (gasDigital == 0 || gasAnalog > 35) {
     tone(SPEAKER_PIN, NOTE_C2, 100, 0);
-    delay(25);
     tone(SPEAKER_PIN, NOTE_C2, 100, 0);
-    delay(25);
     tone(SPEAKER_PIN, NOTE_C2, 100, 0);
     lcd.print("Dangerous   ");
     delay(750); // Make sure folks can read message.
   } else {
     lcd.print("Safe Air    ");
   }
+}
+
+void state10Online() {
+  if (machine.executeOnce) {
+    lcd.print("Wifi");
+    WiFi.mode(WIFI_STA); //Optional
+    WiFi.onEvent(connected_to_ap, ARDUINO_EVENT_WIFI_STA_CONNECTED);
+    WiFi.onEvent(got_ip_from_ap, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+    WiFi.onEvent(disconnected_from_ap, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+    
+    // Start new timeout.
+    wifiTimeoutStart = millis();
+    wifiDisconnected = false;
+    WiFi.begin(ssid, password);
+    lcd.setCursor(0, 1);
+    lcd.print("Connecting");
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED && !wifiDisconnected) {
+    lcd.print(".");
+
+    // Have we timed out?
+    if (millis() - wifiTimeoutStart > 20000) {
+      wifiDisconnected = true;
+    lcd.setCursor(0, 1);
+    lcd.print("Error connecting!");  
+    }
+  }
+}
+
+void connected_to_ap(WiFiEvent_t wifi_event, WiFiEventInfo_t wifi_info) {
+  Serial.println("Connected to WiFi.");
+}
+
+void disconnected_from_ap(WiFiEvent_t wifi_event, WiFiEventInfo_t wifi_info) {
+  Serial.println("Disconnected from WiFi.");
+  
+  // If we're disconnected, reconnect.
+  if (machine.currentState == State10Online) {
+    wifiTimeoutStart = millis();
+    wifiDisconnected = false;
+    WiFi.begin(ssid, password);
+    lcd.setCursor(0, 1);
+    lcd.print("Connecting");
+  }
+}
+
+void got_ip_from_ap(WiFiEvent_t wifi_event, WiFiEventInfo_t wifi_info) {
+  lcd.setCursor(0, 0);
+  lcd.print("Wifi ");
+  lcd.print(ssid);
+  lcd.setCursor(0, 1);
+  lcd.print(WiFi.localIP());
 }
 
 void exitState4Fan() {
@@ -503,6 +569,10 @@ void exitState4Fan() {
 
 void exitState7NeoPixel() {
   colorWipe(neoStrip.Color(0, 0, 0), 0);
+}
+
+void exitState10Online() {
+  WiFi.disconnect();
 }
 
 void exitCurrentState() {
