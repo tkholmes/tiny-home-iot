@@ -1,3 +1,6 @@
+#include <ESP32Tone.h>
+#include <pitches.h>
+
 #include <xht11.h>
 #include <StateMachine.h>
 #include <LiquidCrystal_I2C.h>
@@ -6,31 +9,35 @@
 #include <Wire.h>
 #include <MFRC522_I2C.h>
 #include <Adafruit_NeoPixel.h>
-// #include <avr/power.h> // Required for 16 MHz Adafruit Trinket
 
 // Yellow Buttons (Menu/Interact)
 #define YELLOW_BUTTON_1_PIN 16
 #define YELLOW_BUTTON_2_PIN 27
-#define LED_INDICATOR_PIN 12
-#define TEMP_HUMID_PIN 17
-#define WATER_SENSOR_PIN 34
-#define FAN_MOTOR_PMW_PIN 19
-#define FAN_SPEED_PIN 18
-#define PROXIMITY_PIN 14
-#define RFID_PIN 16
-#define WINDOW_SERVO_PIN 5
-#define DOOR_SERVO_PIN 13
-#define NEO_PIXEL_PIN 26
+#define LED_INDICATOR_PIN   12
+#define TEMP_HUMID_PIN      17
+#define WATER_SENSOR_PIN    34
+#define FAN_MOTOR_PMW_PIN   19
+#define FAN_SPEED_PIN       18
+#define PROXIMITY_PIN       14
+#define RFID_PIN            16
+#define WINDOW_SERVO_PIN    5
+#define DOOR_SERVO_PIN      13
+#define NEO_PIXEL_PIN       26
+#define SPEAKER_PIN         25
+#define GAS_DIGITAL_PIN     23
+#define GAS_ANALOG_PIN      35
 
 // State Machine States
-#define State0Home 0
-#define State1LED 1
-#define State2Temp 2
-#define State3Water 3
-#define State4Fan 4
+#define State0Home      0
+#define State1LED       1
+#define State2Temp      2
+#define State3Water     3
+#define State4Fan       4
 #define State5Proximity 5
-#define State6RfidOpen 6
-#define State7NeoPixel 7
+#define State6RfidOpen  6
+#define State7NeoPixel  7
+#define State8Sound     8
+#define State9Gas       9
 
 // LCD
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -47,6 +54,8 @@ State* S4 = machine.addState(&state4Fan);
 State* S5 = machine.addState(&state5Proximity);
 State* S6 = machine.addState(&state6Rfid);
 State* S7 = machine.addState(&state7NeoPixel);
+State* S8 = machine.addState(&state8Sound);
+State* S9 = machine.addState(&state9Gas);
 
 // Button Handlers
 // (The ids are so one handler function can tell different buttons apart if necessary.)
@@ -66,7 +75,7 @@ int fanMode = 0;
 
 // Door & Window
 bool doorOpen = false;
-bool windowOpen = false;
+bool windowOpen = true;
 Servo windowMotor;
 Servo doorMotor;
 
@@ -78,6 +87,11 @@ String password = "";
 // NeoPxel
 Adafruit_NeoPixel neoStrip(4, NEO_PIXEL_PIN, NEO_GRB + NEO_KHZ800);
 int lightMode = 0;
+
+// Sound
+int musicScale[8] = { NOTE_C4, NOTE_D4, NOTE_E4, NOTE_F4, NOTE_G4, NOTE_A5, NOTE_B5, NOTE_C5 };
+String musicScaleNotes[8] = { "C4", "D4", "E4", "F4", "G4", "A5", "B5", "C5" };
+int musicNoteIndex = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -94,18 +108,23 @@ void setup() {
   // Servos
   windowMotor.attach(WINDOW_SERVO_PIN);
   doorMotor.attach(DOOR_SERVO_PIN);
-  windowMotor.write(0);
-  windowOpen = false;
+  
+  // Start Window open as it's often left open from paging through menus (ie. State3Water).
+  windowMotor.write(180);
+  windowOpen = true;
   doorMotor.write(0);
   doorOpen = false;
 
-  // Button Setup
+  // Pin Setup
   pinMode(YELLOW_BUTTON_1_PIN, INPUT_PULLUP);
   pinMode(YELLOW_BUTTON_2_PIN, INPUT_PULLUP);
-  pinMode(LED_INDICATOR_PIN, OUTPUT);  //Set pin to output mode
+  pinMode(LED_INDICATOR_PIN, OUTPUT);
   pinMode(FAN_MOTOR_PMW_PIN, OUTPUT);
   pinMode(FAN_SPEED_PIN, OUTPUT);
   pinMode(PROXIMITY_PIN, INPUT);
+  pinMode(SPEAKER_PIN, OUTPUT);
+  pinMode(GAS_DIGITAL_PIN, INPUT);
+  pinMode(GAS_ANALOG_PIN, INPUT);
 
   neoStrip.begin();            // INITIALIZE NeoPixel strip object (REQUIRED)
   neoStrip.show();             // Turn OFF all pixels ASAP
@@ -136,6 +155,9 @@ static void stateChange_Handler(uint8_t btnId, uint8_t btnState) {
     // Button Pressed
   } else {
     // btnState == BTN_OPEN.
+    // General exit state handler.
+    exitCurrentState();
+
     switch (machine.currentState) {
       case State0Home:
         machine.transitionTo(S1);
@@ -151,6 +173,7 @@ static void stateChange_Handler(uint8_t btnId, uint8_t btnState) {
         break;
       case State4Fan:
         machine.transitionTo(S5);
+        exitState4Fan();
         break;
       case State5Proximity:
         machine.transitionTo(S6);
@@ -159,15 +182,21 @@ static void stateChange_Handler(uint8_t btnId, uint8_t btnState) {
         machine.transitionTo(S7);
         break;
       case State7NeoPixel:
-        machine.transitionTo(S0);
+        machine.transitionTo(S8);
         exitState7NeoPixel();
+        break;
+      case State8Sound:
+        machine.transitionTo(S9);
+        break;
+      case State9Gas:
+        machine.transitionTo(S0);
         break;
       default:
         Serial.println("No state transition found!");
     }
-
-    exitCurrentState();
     machine.run();
+    Serial.print("Now in state: ");
+    Serial.println(machine.currentState);
   }
 }
 
@@ -206,11 +235,22 @@ static void action_Handler(uint8_t btnId, uint8_t btnState) {
           doorMotor.write(0);
           doorOpen = false;
         }
+        break;
       case State7NeoPixel:
         lightMode++;
         if (lightMode > 8) {
           lightMode = 0;
         }
+        break;
+      case State8Sound:
+        tone(SPEAKER_PIN, musicScale[musicNoteIndex], 250, 0);
+        Serial.print("Music index:");
+        Serial.println(musicNoteIndex);
+        musicNoteIndex++;
+        if (musicNoteIndex > 7) {
+          musicNoteIndex = 0;
+        }
+        break;
       default:
         Serial.println("No state transition found!");
     }
@@ -381,8 +421,6 @@ void state7NeoPixel() {
     lcd.print("Neo Pixel Lights");
   }
   lcd.setCursor(0, 1);
-  Serial.println("Neo state: ");
-  Serial.println(lightMode);
 
   switch (lightMode) {
     case 0:  // OFF
@@ -419,10 +457,48 @@ void state7NeoPixel() {
       break;
     case 8:  // RAINBOW
       lcd.print("RAINBOW   ");
-      //rainbow(0);
       theaterChaseRainbow(2);
       break;
   }
+}
+
+void state8Sound() {
+  if (machine.executeOnce) {
+    lcd.print("Sound");
+  }
+  lcd.setCursor(0, 1);
+
+  lcd.print(musicScaleNotes[musicNoteIndex]);
+  lcd.print("    ");
+}
+
+void state9Gas() {
+  if (machine.executeOnce) {
+    lcd.print("Gas Detector");
+  }
+  lcd.setCursor(0, 1);
+  
+  int gasDigital = digitalRead(GAS_DIGITAL_PIN);
+  float gasAnalog = analogRead(GAS_ANALOG_PIN);
+
+  // Hazerdous gas detected!
+  if (gasDigital == 0 || gasAnalog > 35) {
+    tone(SPEAKER_PIN, NOTE_C2, 100, 0);
+    delay(25);
+    tone(SPEAKER_PIN, NOTE_C2, 100, 0);
+    delay(25);
+    tone(SPEAKER_PIN, NOTE_C2, 100, 0);
+    lcd.print("Dangerous   ");
+    delay(750); // Make sure folks can read message.
+  } else {
+    lcd.print("Safe Air    ");
+  }
+}
+
+void exitState4Fan() {
+  digitalWrite(FAN_MOTOR_PMW_PIN, LOW);  //pwm = 0
+  analogWrite(FAN_SPEED_PIN, 0);
+  fanMode = 0;
 }
 
 void exitState7NeoPixel() {
@@ -430,11 +506,13 @@ void exitState7NeoPixel() {
 }
 
 void exitCurrentState() {
-  Serial.println("Exit state: ");
+  Serial.print("Exiting state: ");
   Serial.println(machine.currentState);
   lcd.clear();
   lcd.setCursor(0, 0);
 }
+
+// NEO PIXEL FUNCTIONS (to be broken out)
 
 void colorWipe(uint32_t color, int wait) {
   for (int i = 0; i < neoStrip.numPixels(); i++) {  // For each pixel in strip...
